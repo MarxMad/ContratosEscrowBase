@@ -5,13 +5,20 @@ import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Counters.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
 import "./CUToken.sol";
 
-contract GenericMarketplace is ERC721URIStorage, Ownable, ReentrancyGuard {
+contract GenericMarketplace is ERC721URIStorage, Ownable, ReentrancyGuard, Pausable {
     using Counters for Counters.Counter;
     Counters.Counter private _tokenIds;
 
     CampusCoin public campusCoin;
+    
+    // Límites de seguridad
+    uint256 public constant MAX_PRICE = 1000000 * 10**18; // 1M tokens máximo
+    uint256 public constant MAX_DELIVERY_TIME = 30 * 24; // 30 días máximo
+    uint256 public constant MIN_DELIVERY_TIME = 1; // 1 hora mínimo
+    uint256 public constant MAX_STRING_LENGTH = 1000; // 1000 caracteres máximo
     
     // Categorías de productos
     enum ProductCategory {
@@ -47,6 +54,7 @@ contract GenericMarketplace is ERC721URIStorage, Ownable, ReentrancyGuard {
     event RefundIssued(uint256 indexed tokenId, address indexed buyer, uint256 amount);
 
     constructor(address _campusCoin) ERC721("CampusMarketplace", "CMP") Ownable(msg.sender) {
+        require(_campusCoin != address(0), "Invalid token address");
         campusCoin = CampusCoin(_campusCoin);
     }
 
@@ -57,10 +65,16 @@ contract GenericMarketplace is ERC721URIStorage, Ownable, ReentrancyGuard {
         uint256 price,
         ProductCategory category,
         uint256 deliveryTimeHours
-    ) external returns (uint256) {
-        require(price > 0, "Price must be greater than 0");
-        require(deliveryTimeHours > 0, "Delivery time must be specified");
+    ) external whenNotPaused returns (uint256) {
+        // Validaciones de entrada mejoradas
         require(bytes(productName).length > 0, "Product name required");
+        require(bytes(productName).length <= MAX_STRING_LENGTH, "Product name too long");
+        require(bytes(productDescription).length <= MAX_STRING_LENGTH, "Description too long");
+        require(bytes(tokenURI).length <= MAX_STRING_LENGTH, "Token URI too long");
+        require(price > 0, "Price must be greater than 0");
+        require(price <= MAX_PRICE, "Price too high");
+        require(deliveryTimeHours >= MIN_DELIVERY_TIME, "Delivery time too short");
+        require(deliveryTimeHours <= MAX_DELIVERY_TIME, "Delivery time too long");
         
         _tokenIds.increment();
         uint256 newTokenId = _tokenIds.current();
@@ -86,11 +100,17 @@ contract GenericMarketplace is ERC721URIStorage, Ownable, ReentrancyGuard {
         return newTokenId;
     }
 
-    function buy(uint256 tokenId) external nonReentrant {
+    function buy(uint256 tokenId) external nonReentrant whenNotPaused {
         Product storage product = products[tokenId];
         require(!product.sold, "Product already sold");
         require(ownerOf(tokenId) == product.seller, "Seller no longer owns the product");
         require(msg.sender != product.seller, "Cannot buy your own product");
+        
+        // Verificar allowance antes de transferir
+        require(
+            campusCoin.allowance(msg.sender, address(this)) >= product.price,
+            "Insufficient allowance"
+        );
         
         require(
             campusCoin.transferFrom(msg.sender, address(this), product.price),
@@ -105,7 +125,7 @@ contract GenericMarketplace is ERC721URIStorage, Ownable, ReentrancyGuard {
         emit ProductPurchased(tokenId, msg.sender, product.price);
     }
 
-    function confirmDelivery(uint256 tokenId) external nonReentrant {
+    function confirmDelivery(uint256 tokenId) external nonReentrant whenNotPaused {
         Product storage product = products[tokenId];
         require(product.sold, "Product not sold");
         require(msg.sender == product.buyer, "Only buyer can confirm");
@@ -126,6 +146,7 @@ contract GenericMarketplace is ERC721URIStorage, Ownable, ReentrancyGuard {
         Product storage product = products[tokenId];
         require(product.sold, "Product not sold");
         require(!product.confirmed, "Product already delivered");
+        require(bytes(reason).length > 0, "Reason required");
         require(
             msg.sender == product.buyer || msg.sender == product.seller || msg.sender == owner(),
             "Not authorized to cancel"
@@ -282,5 +303,67 @@ contract GenericMarketplace is ERC721URIStorage, Ownable, ReentrancyGuard {
     function isExpired(uint256 tokenId) external view returns (bool) {
         Product storage product = products[tokenId];
         return block.timestamp > product.deliveryDeadline && product.sold && !product.confirmed;
+    }
+    
+    // Funciones de pausa de emergencia
+    function pause() external onlyOwner {
+        _pause();
+    }
+    
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+    
+    // Función de emergencia para recuperar tokens
+    function emergencyWithdraw(address token, uint256 amount) external onlyOwner {
+        require(token != address(0), "Invalid token address");
+        require(amount > 0, "Amount must be greater than 0");
+        
+        if (token == address(campusCoin)) {
+            require(campusCoin.transfer(owner(), amount), "Transfer failed");
+        }
+    }
+    
+    // Consultas optimizadas con paginación
+    function getAllProductsPaginated(uint256 limit, uint256 offset) external view returns (
+        uint256[] memory tokenIds,
+        address[] memory sellers,
+        uint256[] memory prices,
+        bool[] memory soldFlags,
+        bool[] memory confirmedFlags,
+        address[] memory buyers,
+        ProductCategory[] memory categories,
+        string[] memory productNames
+    ) {
+        require(limit > 0 && limit <= 100, "Invalid limit");
+        require(offset < allTokenIds.length, "Invalid offset");
+        
+        uint256 length = allTokenIds.length;
+        uint256 end = offset + limit;
+        if (end > length) end = length;
+        
+        uint256 resultLength = end - offset;
+        tokenIds = new uint256[](resultLength);
+        sellers = new address[](resultLength);
+        prices = new uint256[](resultLength);
+        soldFlags = new bool[](resultLength);
+        confirmedFlags = new bool[](resultLength);
+        buyers = new address[](resultLength);
+        categories = new ProductCategory[](resultLength);
+        productNames = new string[](resultLength);
+
+        for (uint256 i = offset; i < end; i++) {
+            uint256 tokenId = allTokenIds[i];
+            Product storage product = products[tokenId];
+            uint256 index = i - offset;
+            tokenIds[index] = tokenId;
+            sellers[index] = product.seller;
+            prices[index] = product.price;
+            soldFlags[index] = product.sold;
+            confirmedFlags[index] = product.confirmed;
+            buyers[index] = product.buyer;
+            categories[index] = product.category;
+            productNames[index] = product.productName;
+        }
     }
 }
