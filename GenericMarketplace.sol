@@ -305,6 +305,228 @@ contract GenericMarketplace is ERC721URIStorage, Ownable, ReentrancyGuard, Pausa
         return block.timestamp > product.deliveryDeadline && product.sold && !product.confirmed;
     }
     
+    // ===== FUNCIONES ADICIONALES PARA FRONTEND =====
+    
+    // Obtener estadísticas del marketplace
+    function getMarketplaceStats() external view returns (
+        uint256 totalProducts,
+        uint256 totalSold,
+        uint256 totalConfirmed,
+        uint256 totalActive
+    ) {
+        totalProducts = allTokenIds.length;
+        uint256 sold = 0;
+        uint256 confirmed = 0;
+        uint256 active = 0;
+        
+        for (uint256 i = 0; i < allTokenIds.length; i++) {
+            Product storage product = products[allTokenIds[i]];
+            if (product.sold) {
+                sold++;
+                if (product.confirmed) {
+                    confirmed++;
+                } else {
+                    active++;
+                }
+            }
+        }
+        
+        return (totalProducts, sold, confirmed, active);
+    }
+    
+    // Obtener productos por estado (disponibles, vendidos, confirmados)
+    function getProductsByStatus(bool sold, bool confirmed) external view returns (uint256[] memory) {
+        uint256 count = 0;
+        for (uint256 i = 0; i < allTokenIds.length; i++) {
+            Product storage product = products[allTokenIds[i]];
+            if (product.sold == sold && product.confirmed == confirmed) {
+                count++;
+            }
+        }
+        
+        uint256[] memory filteredProducts = new uint256[](count);
+        uint256 index = 0;
+        for (uint256 i = 0; i < allTokenIds.length; i++) {
+            Product storage product = products[allTokenIds[i]];
+            if (product.sold == sold && product.confirmed == confirmed) {
+                filteredProducts[index] = allTokenIds[i];
+                index++;
+            }
+        }
+        return filteredProducts;
+    }
+    
+    // Obtener historial completo de un usuario
+    function getUserHistory(address user) external view returns (
+        uint256[] memory listedProducts,
+        uint256[] memory purchasedProducts,
+        uint256[] memory soldProducts,
+        uint256[] memory confirmedPurchases
+    ) {
+        uint256 listedCount = 0;
+        uint256 purchasedCount = 0;
+        uint256 soldCount = 0;
+        uint256 confirmedCount = 0;
+        
+        // Contar productos
+        for (uint256 i = 0; i < allTokenIds.length; i++) {
+            Product storage product = products[allTokenIds[i]];
+            if (product.seller == user) {
+                listedCount++;
+                if (product.sold) {
+                    soldCount++;
+                }
+            }
+            if (product.buyer == user) {
+                purchasedCount++;
+                if (product.confirmed) {
+                    confirmedCount++;
+                }
+            }
+        }
+        
+        // Crear arrays
+        listedProducts = new uint256[](listedCount);
+        purchasedProducts = new uint256[](purchasedCount);
+        soldProducts = new uint256[](soldCount);
+        confirmedPurchases = new uint256[](confirmedCount);
+        
+        uint256 listedIndex = 0;
+        uint256 purchasedIndex = 0;
+        uint256 soldIndex = 0;
+        uint256 confirmedIndex = 0;
+        
+        // Llenar arrays
+        for (uint256 i = 0; i < allTokenIds.length; i++) {
+            Product storage product = products[allTokenIds[i]];
+            if (product.seller == user) {
+                listedProducts[listedIndex] = allTokenIds[i];
+                listedIndex++;
+                if (product.sold) {
+                    soldProducts[soldIndex] = allTokenIds[i];
+                    soldIndex++;
+                }
+            }
+            if (product.buyer == user) {
+                purchasedProducts[purchasedIndex] = allTokenIds[i];
+                purchasedIndex++;
+                if (product.confirmed) {
+                    confirmedPurchases[confirmedIndex] = allTokenIds[i];
+                    confirmedIndex++;
+                }
+            }
+        }
+    }
+    
+    // Obtener productos que están próximos a expirar
+    function getExpiringProducts(uint256 hoursFromNow) external view returns (uint256[] memory) {
+        uint256 deadline = block.timestamp + (hoursFromNow * 1 hours);
+        uint256 count = 0;
+        
+        for (uint256 i = 0; i < allTokenIds.length; i++) {
+            Product storage product = products[allTokenIds[i]];
+            if (product.sold && !product.confirmed && product.deliveryDeadline <= deadline) {
+                count++;
+            }
+        }
+        
+        uint256[] memory expiringProducts = new uint256[](count);
+        uint256 index = 0;
+        for (uint256 i = 0; i < allTokenIds.length; i++) {
+            Product storage product = products[allTokenIds[i]];
+            if (product.sold && !product.confirmed && product.deliveryDeadline <= deadline) {
+                expiringProducts[index] = allTokenIds[i];
+                index++;
+            }
+        }
+        return expiringProducts;
+    }
+    
+    // Obtener tiempo restante para entrega
+    function getTimeRemaining(uint256 tokenId) external view returns (uint256) {
+        Product storage product = products[tokenId];
+        if (block.timestamp >= product.deliveryDeadline) {
+            return 0;
+        }
+        return product.deliveryDeadline - block.timestamp;
+    }
+    
+    // Verificar si un usuario puede comprar un producto
+    function canBuy(uint256 tokenId, address buyer) external view returns (bool, string memory) {
+        Product storage product = products[tokenId];
+        
+        if (product.sold) {
+            return (false, "Product already sold");
+        }
+        if (buyer == product.seller) {
+            return (false, "Cannot buy your own product");
+        }
+        if (ownerOf(tokenId) != product.seller) {
+            return (false, "Seller no longer owns the product");
+        }
+        
+        return (true, "Can buy");
+    }
+    
+    // Verificar si un usuario puede confirmar entrega
+    function canConfirmDelivery(uint256 tokenId, address user) external view returns (bool, string memory) {
+        Product storage product = products[tokenId];
+        
+        if (!product.sold) {
+            return (false, "Product not sold");
+        }
+        if (user != product.buyer) {
+            return (false, "Only buyer can confirm");
+        }
+        if (product.confirmed) {
+            return (false, "Already confirmed");
+        }
+        
+        return (true, "Can confirm");
+    }
+    
+    // Obtener productos por rango de precio
+    function getProductsByPriceRange(uint256 minPrice, uint256 maxPrice) external view returns (uint256[] memory) {
+        uint256 count = 0;
+        for (uint256 i = 0; i < allTokenIds.length; i++) {
+            Product storage product = products[allTokenIds[i]];
+            if (product.price >= minPrice && product.price <= maxPrice) {
+                count++;
+            }
+        }
+        
+        uint256[] memory priceFilteredProducts = new uint256[](count);
+        uint256 index = 0;
+        for (uint256 i = 0; i < allTokenIds.length; i++) {
+            Product storage product = products[allTokenIds[i]];
+            if (product.price >= minPrice && product.price <= maxPrice) {
+                priceFilteredProducts[index] = allTokenIds[i];
+                index++;
+            }
+        }
+        return priceFilteredProducts;
+    }
+    
+    // Obtener total de productos por categoría
+    function getCategoryStats() external view returns (
+        uint256 books,
+        uint256 electronics,
+        uint256 clothing,
+        uint256 sports,
+        uint256 home,
+        uint256 other
+    ) {
+        for (uint256 i = 0; i < allTokenIds.length; i++) {
+            Product storage product = products[allTokenIds[i]];
+            if (product.category == ProductCategory.BOOKS) books++;
+            else if (product.category == ProductCategory.ELECTRONICS) electronics++;
+            else if (product.category == ProductCategory.CLOTHING) clothing++;
+            else if (product.category == ProductCategory.SPORTS) sports++;
+            else if (product.category == ProductCategory.HOME) home++;
+            else if (product.category == ProductCategory.OTHER) other++;
+        }
+    }
+    
     // Funciones de pausa de emergencia
     function pause() external onlyOwner {
         _pause();
